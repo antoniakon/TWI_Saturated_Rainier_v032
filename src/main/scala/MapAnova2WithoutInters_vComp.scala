@@ -1,5 +1,4 @@
 import java.io.{BufferedWriter, File, FileWriter}
-
 import breeze.linalg._
 import com.cibo.evilplot.numeric.Point
 import com.cibo.evilplot.plot.{LinePlot, _}
@@ -8,8 +7,9 @@ import com.stripe.rainier.compute._
 import com.stripe.rainier.core._
 import com.stripe.rainier.sampler._
 import com.stripe.rainier.notebook._
-
+import breeze.stats.mean
 import scala.annotation.tailrec
+import scala.collection.mutable
 
 object MapAnova2WithoutInters_vComp {
 
@@ -25,7 +25,7 @@ object MapAnova2WithoutInters_vComp {
   def dataProcessing(): (Map[(Int, Int), List[Double]], (Array[Double], Array[Int], Array[Int]), Int, Int) = {
     val data = csvread(new File("/home/antonia/ResultsFromCloud/CompareRainier/040619/withoutInteractions/1M/simulNoInter040619.csv"))
     val sampleSize = data.rows
-    println(sampleSize)
+    //println(sampleSize)
     val y = data(::, 0).toArray
     val alpha = data(::, 1).map(_.toInt)
     val beta = data(::, 2).map(_.toInt)
@@ -140,22 +140,32 @@ object MapAnova2WithoutInters_vComp {
       ret
     }
 
-    //HMC(150, 100, 50) each chain 100 samples, 4 chains by default, 150  warmup iterations, 50 leapfrog steps
     println("sampling...")
     val vecModel = implementation2()
-    val trace = time(vecModel.sample(HMC(100, 100, 50)))
+    val warmupIters = 1000
+    val samplesPerChain = 1000
+    val leapfrogSteps = 100
+    val thinBy = 10
+    val trace = time(vecModel.sample(HMC(warmupIters, samplesPerChain, leapfrogSteps)))
+    val traceThinned = trace.thin(thinBy)
 
-    val posteriormu = trace.predict(mu)
-    val posteriora1 = trace.predict(eff1p(0))
-    val posteriorb10 = trace.predict(eff2p(9))
-    //show("mu", density(posterior))
-    //val resWithNames = trace.thin(10).chains.map(l => l.map(ar => (varNames zip ar).toMap)) //(4 Lists bcs 4 chains, each chain has its own Map )
-    //val resWithNamesFl =  resWithNames.flatten //each sample becomes a map
-    //val res = resWithNamesFl.map(el => el.toList).reduce(_++_).groupBy(_._1).map{case(k, v) => k -> v.map(_._2).toSeq}
-    //val finalres= res.map{ case (k, v) => (k, v.sum/v.size)}
+    var postAlphas = new mutable.ListBuffer[List[Double]]
+    for(i <- 0 until n1){
+      postAlphas += traceThinned.predict(eff1p(i))
+    }
 
-    println(posteriormu.sum/posteriormu.size)
-    println(posteriora1.sum/posteriora1.size)
-    println(posteriorb10.sum/posteriorb10.size)
+    val postBetas = new mutable.ListBuffer[List[Double]]
+    for(i <- 0 until n2){
+      postBetas += traceThinned.predict(eff2p(i))
+    }
+
+    val postmuTaus = Array(traceThinned.predict(mu).toArray, traceThinned.predict(tauDRV).toArray, traceThinned.predict(tauE1RV).toArray, traceThinned.predict(tauE2RV).toArray)
+
+    println("mu, taus")
+    println(postmuTaus.map(el=> mean(el)).toList)
+    println("alphas")
+    println(postAlphas.map(el=> el.sum/el.size))
+    println("betas")
+    println(postBetas.map(el=> el.sum/el.size))
   }
 }
