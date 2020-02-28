@@ -1,4 +1,4 @@
-import java.io.File
+import java.io.{BufferedWriter, File, FileWriter}
 
 import breeze.linalg._
 import com.cibo.evilplot.numeric.Point
@@ -7,6 +7,7 @@ import com.cibo.evilplot.plot.aesthetics.DefaultTheme._
 import com.stripe.rainier.compute._
 import com.stripe.rainier.core._
 import com.stripe.rainier.sampler._
+import com.stripe.rainier.notebook._
 
 import scala.annotation.tailrec
 
@@ -14,16 +15,17 @@ object MapAnova2WithoutInters_vComp {
 
   def main(args: Array[String]): Unit = {
     val rng = ScalaRNG(3)
-    val (data, n1, n2) = dataProcessing()
-    mainEffects(data, rng, n1, n2)
+    val (data, dataRaw, n1, n2) = dataProcessing()
+    mainEffects(data, dataRaw, rng, n1, n2)
   }
 
   /**
    * Process data read from input file
    */
-  def dataProcessing(): (Map[(Int, Int), List[Double]], Int, Int) = {
+  def dataProcessing(): (Map[(Int, Int), List[Double]], (Array[Double], Array[Int], Array[Int]), Int, Int) = {
     val data = csvread(new File("/home/antonia/ResultsFromCloud/CompareRainier/040619/withoutInteractions/1M/simulNoInter040619.csv"))
     val sampleSize = data.rows
+    println(sampleSize)
     val y = data(::, 0).toArray
     val alpha = data(::, 1).map(_.toInt)
     val beta = data(::, 2).map(_.toInt)
@@ -38,26 +40,30 @@ object MapAnova2WithoutInters_vComp {
     //println(dataList)
 
     val dataMap = (dataList zip y).groupBy(_._1).map { case (k, v) => ((k._1 - 1, k._2 - 1), v.map(_._2)) } //Bring the data to the map format
+    val dataRaw = (y.map(i => i-1), alpha.toArray.map(i => i-1), beta.toArray.map(i => i-1))
     //println(dataMap)
-    (dataMap, nj, nk)
+    (dataMap, dataRaw, nj, nk)
 
   }
 
-    /**
+  /**
    * Use Rainier for modelling the main effects only, without interactions
    */
-  def mainEffects(dataMap: Map[(Int, Int), List[Double]], rngS: ScalaRNG, n1: Int, n2: Int): Unit = {
+  def mainEffects(dataMap: Map[(Int, Int), List[Double]], dataRaw: (Array[Double], Array[Int], Array[Int]), rngS: ScalaRNG, n1: Int, n2: Int): Unit = {
 
     // Implementation of sqrt for Real
     def sqrtR(x: Real): Real = {
       val lx = (Real(0.5) * x.log).exp
       lx
     }
-    val varNames = (1 to 29 toList).map(i => i.toString)
+
+    val obs = dataRaw._1
+    val alpha = dataRaw._2
+    val beta = dataRaw._3
 
     implicit val rng = rngS
     val n = dataMap.size //No of groups
-    // All prior values for the unknown parameters, defined as follows, are stored in lists, to be able to process and print the results at the end.
+    // Priors for the unknown parameters
     val mu = Normal(0, 100).latent
 
     // Sample tau, estimate sd to be used in sampling from Normal the effects for the 1st variable
@@ -72,21 +78,84 @@ object MapAnova2WithoutInters_vComp {
     val tauDRV = Gamma(1, 10000).latent
     val sdDR = sqrtR(Real(1.0) / tauDRV)
 
-    val eff1 = Vector.fill(n1)(Normal(0, sdE1).latent)
-    val eff2 = Vector.fill(n2)(Normal(0, sdE2).latent)
+    //Create a Vec[Real] for each effect
+    val eff1p = Normal(0, sdE1).latentVec(n1)
+    val eff2p = Normal(0, sdE2).latentVec(n2)
 
-    val dataMapKeysToIndexseq = dataMap.keys.toIndexedSeq
+    /**
+     * Uses the imported data in format (y, alpha, beta)
+     * 1. Creates an indexedSeq[Real] with the group means.
+     * 2. Turns this to Vec
+     * 3. maps over the vec to create a normal for each observation
+     * 4. Builds the model
+     *
+     * PROBLEM: Does not do anything
+     */
+    def implementation1(): Model ={
+      val allEffs = (0 until obs.size).map(i => mu + eff1p(alpha(i)) + eff2p(beta(i))) //1.
+      val allEffsVec = Vec.from(allEffs) //2.
+      val modelVec = allEffsVec.map{i:Real => Normal(i, sdDR)} //3.
+      val vecModel = Model.observe(obs.toList, modelVec) //4.
+      vecModel
+    }
 
-    val models = (0 until n).map( z => Model.observe(dataMap(dataMapKeysToIndexseq(z)._1, dataMapKeysToIndexseq(z)._2), Normal(mu + eff1(dataMapKeysToIndexseq(z)._1) + eff2(dataMapKeysToIndexseq(z)._2), sdDR)))
+    /**
+     * Uses the imported data in format (y, alpha, beta)
+     * 1. Creates a Vec[Real] for columns alpha & beta
+     * 2. zips the vecs to one Vec[(Real, Real)] to map over
+     * 3. maps over the Vec[(Real, Real)] to create a normal for each observation
+     * 4. Builds the model
+     *
+     * Problem: Slow and wrong results
+     * e.g. For HMC(100, 100, 50) time: 380505.616669ms
+     */
+    def implementation2(): Model = {
+      val eff1Vec = Vec.from(alpha) //1.
+      val eff2Vec = Vec.from(beta) //1.
+      val eff1VecZipEff2Vec = eff1Vec zip eff2Vec //2.
+      val modeleff1Vec = eff1VecZipEff2Vec.map{case (a,b) => Normal(mu + eff1p(a) + eff2p(b), sdDR)} //3.
+      val vecModel = Model.observe(obs.toList, modeleff1Vec) //4.
+      vecModel
+    }
 
-    println(models)
-    val model = models.reduce { (m1, m2) => m1.merge(m2) }
+    /**
+     * Uses the imported data in format Map[(Int, Int), List[Double]]
+     * 1. Creates an indexedSeq[(Int, Int)] for the keys = groups. No of groups n = n1 x n2
+     * 2. Creates the model per group
+     * 3. Merges all the models
+     *
+     * PROBLEM: Slow and wrong results
+     */
+    def implementation3(): Model = {
+      val dataMapKeysToIndexseq = dataMap.keys.toIndexedSeq //1.
+      val models = (0 until n).map( z => Model.observe(dataMap(dataMapKeysToIndexseq(z)._1, dataMapKeysToIndexseq(z)._2), Normal(mu + eff1p(dataMapKeysToIndexseq(z)._1) + eff2p(dataMapKeysToIndexseq(z)._2), sdDR))) //2.
+      val model = models.reduce { (m1, m2) => m1.merge(m2) } //3.
+      model
+    }
 
-    println("sampling...")
-    val thin = 100
+    def time[A](f: => A) = {
+      val s = System.nanoTime
+      val ret = f
+      println("time: " + (System.nanoTime - s) / 1e6 + "ms")
+      ret
+    }
+
     //HMC(150, 100, 50) each chain 100 samples, 4 chains by default, 150  warmup iterations, 50 leapfrog steps
-    val trace = model.sample(HMC(50, 10, 5))
-    val resWithNames = trace.chains.map(l => l.map(ar => varNames.map(name => (name, ar)).toMap))
-    println(resWithNames)
+    println("sampling...")
+    val vecModel = implementation2()
+    val trace = time(vecModel.sample(HMC(100, 100, 50)))
+
+    val posteriormu = trace.predict(mu)
+    val posteriora1 = trace.predict(eff1p(0))
+    val posteriorb10 = trace.predict(eff2p(9))
+    //show("mu", density(posterior))
+    //val resWithNames = trace.thin(10).chains.map(l => l.map(ar => (varNames zip ar).toMap)) //(4 Lists bcs 4 chains, each chain has its own Map )
+    //val resWithNamesFl =  resWithNames.flatten //each sample becomes a map
+    //val res = resWithNamesFl.map(el => el.toList).reduce(_++_).groupBy(_._1).map{case(k, v) => k -> v.map(_._2).toSeq}
+    //val finalres= res.map{ case (k, v) => (k, v.sum/v.size)}
+
+    println(posteriormu.sum/posteriormu.size)
+    println(posteriora1.sum/posteriora1.size)
+    println(posteriorb10.sum/posteriorb10.size)
   }
 }
