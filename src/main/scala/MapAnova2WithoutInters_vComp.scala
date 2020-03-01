@@ -11,9 +11,11 @@ import com.stripe.rainier.sampler._
 import com.stripe.rainier.notebook._
 import breeze.stats.mean
 import java.io.PrintWriter
+
 import org.scalacheck.Prop.Exception
 
 import scala.annotation.tailrec
+import scala.collection.immutable.ListMap
 import scala.collection.mutable
 import scala.collection.mutable.ListBuffer
 
@@ -160,26 +162,40 @@ object MapAnova2WithoutInters_vComp {
 
     val postmuTaus = DenseMatrix(DenseVector(traceThinned.predict(mu).toArray), DenseVector(traceThinned.predict(tauDRV).toArray), DenseVector(traceThinned.predict(tauE1RV).toArray), DenseVector(traceThinned.predict(tauE2RV).toArray))
 
-    def predictAll(myTrace: Trace, vc: Vec[Real]) : List[List[Double]] = {
-     vc.map(i => myTrace.predict(i)).toList
+    def predictAll(myTrace: Trace, vc: Vec[Real]) : Map[String, List[Double]] = {
+     vc.toList.zipWithIndex.map{
+       case (e, i) => { "effA".concat(i.toString) -> myTrace.predict(e) }
+     }.toMap
     }
 
-    def printSamplesToCsv(filename: String, eff: List[List[Double]]): Unit = {
-      val builder = new StringBuilder()
-
+    def printSamplesToCsv(filename: String, eff: Map[String, List[Double]]): Unit = {
       val pw = new PrintWriter(new File(filename))
 
-      eff.transpose.foreach(line => {
-        line.foreach(double => {
-          builder.append(double.toString)
-          builder.append(",")
-        })
-        builder.deleteCharAt(builder.size-1) //delete last comma in line
+      def flushLineToDisk(builder: StringBuilder): Unit = {
         builder.append("\n")
-
         pw.append(builder) //a. Write at each line
         pw.flush() //a.
-        builder.clear() //a.
+        builder.clear()
+      }
+
+      val builder = new StringBuilder()
+
+      val sortedMap = ListMap(eff.toSeq.sortBy(_._1): _*)
+
+      //write titles to csv and export items as List[List[Double]]
+      val listOfItems = sortedMap.map( mapentry => {
+        builder.append(mapentry._1.concat(","))
+        mapentry._2
+      }).toList
+      builder.deleteCharAt(builder.size-1) //delete last comma in line
+      flushLineToDisk(builder)
+
+      listOfItems.transpose.foreach(line => {
+        line.foreach(double => {
+          builder.append(double.toString.concat(","))
+        })
+        builder.deleteCharAt(builder.size-1) //delete last comma in line
+        flushLineToDisk(builder)
       })
 
 //      pw.print(builder) //Or b. write at the end the whole thing
@@ -194,7 +210,7 @@ object MapAnova2WithoutInters_vComp {
     println("mu, taus")
     println(mean(postmuTaus(::, *)))
     println("alphas")
-    println(postAlphasN.map(el=>el.sum/el.size))
+    println(postAlphasN.map(el=>el._2.sum/el._2.size))
     println("betas")
     //println(mean(dmBetas(::, *)))
 
