@@ -1,4 +1,5 @@
 import java.io.{BufferedWriter, File, FileWriter}
+import java.util.stream.Collectors
 
 import breeze.linalg._
 import com.cibo.evilplot.numeric.Point
@@ -9,6 +10,8 @@ import com.stripe.rainier.core._
 import com.stripe.rainier.sampler._
 import com.stripe.rainier.notebook._
 import breeze.stats.mean
+import java.io.PrintWriter
+import org.scalacheck.Prop.Exception
 
 import scala.annotation.tailrec
 import scala.collection.mutable
@@ -153,38 +156,49 @@ object MapAnova2WithoutInters_vComp {
     val trace = time(vecModel.sample(HMC(warmupIters, samplesPerChain, leapfrogSteps)))
     println("sampling over...")
     val traceThinned = trace.thin(thinBy)
+    val sampNo = samplesPerChain * 4 / thinBy
 
     val postmuTaus = DenseMatrix(DenseVector(traceThinned.predict(mu).toArray), DenseVector(traceThinned.predict(tauDRV).toArray), DenseVector(traceThinned.predict(tauE1RV).toArray), DenseVector(traceThinned.predict(tauE2RV).toArray))
 
-    val postAlphas = new mutable.ListBuffer[DenseMatrix[Double]]
-    for(i <- 0 until n1){
-      println(DenseMatrix(traceThinned.predict(eff1p(i)).toArray).size)
-      postAlphas += DenseMatrix(traceThinned.predict(eff1p(i)).toArray).t
+    def predictAll(myTrace: Trace, vc: Vec[Real]) : List[List[Double]] = {
+     vc.map(i => myTrace.predict(i)).toList
     }
 
-    var dmAlphas = DenseMatrix.zeros[Double](samplesPerChain*4/thinBy,1)
-    for(i <- 0 until n1){
-      dmAlphas = DenseMatrix.horzcat(dmAlphas, postAlphas(i))
-    }
+    def printSamplesToCsv(filename: String, eff: List[List[Double]]): Unit = {
+      val builder = new StringBuilder()
 
-    val postBetas = new mutable.ListBuffer[DenseMatrix[Double]]
-    for(i <- 0 until n2){
-      postBetas += DenseMatrix(traceThinned.predict(eff2p(i)).toArray).t
-    }
+      val pw = new PrintWriter(new File(filename))
 
-    var dmBetas = DenseMatrix.zeros[Double](samplesPerChain*4/thinBy,1)
-    for(i <- 0 until n2){
-      dmBetas = DenseMatrix.horzcat(dmBetas, postBetas(i))
-    }
+      eff.transpose.foreach(line => {
+        line.foreach(double => {
+          builder.append(double.toString)
+          builder.append(",")
+        })
+        builder.deleteCharAt(builder.size-1) //delete last comma in line
+        builder.append("\n")
 
-    val mergedResults = DenseMatrix.horzcat(postmuTaus, dmAlphas, dmBetas)
-    breeze.linalg.csvwrite(new File("/home/antonia/ResultsFromCloud/CompareRainier/040619/withoutInteractions/1M/mutaus.csv"), mergedResults, separator = ',')
+        pw.append(builder) //a. Write at each line
+        pw.flush() //a.
+        builder.clear() //a.
+      })
+
+//      pw.print(builder) //Or b. write at the end the whole thing
+      pw.close()
+    }
+    val postAlphasN = predictAll(traceThinned, eff1p)
+    println("ddd")
+    println(postAlphasN)
+    val added = List(traceThinned.predict(mu), traceThinned.predict(tauDRV))
+    printSamplesToCsv("/home/antonia/ResultsFromCloud/CompareRainier/040619/withoutInteractions/1M/alphasOnly.csv", postAlphasN)
 
     println("mu, taus")
     println(mean(postmuTaus(::, *)))
     println("alphas")
-    println(mean(dmAlphas(::, *)))
+    println(postAlphasN.map(el=>el.sum/el.size))
     println("betas")
-    println(mean(dmBetas(::, *)))
+    //println(mean(dmBetas(::, *)))
+
+
   }
 }
+
