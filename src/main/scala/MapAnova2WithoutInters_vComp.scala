@@ -1,4 +1,5 @@
 import java.io.{BufferedWriter, File, FileWriter}
+
 import breeze.linalg._
 import com.cibo.evilplot.numeric.Point
 import com.cibo.evilplot.plot.{LinePlot, _}
@@ -8,8 +9,10 @@ import com.stripe.rainier.core._
 import com.stripe.rainier.sampler._
 import com.stripe.rainier.notebook._
 import breeze.stats.mean
+
 import scala.annotation.tailrec
 import scala.collection.mutable
+import scala.collection.mutable.ListBuffer
 
 object MapAnova2WithoutInters_vComp {
 
@@ -108,6 +111,7 @@ object MapAnova2WithoutInters_vComp {
      *
      * Problem: Slow and wrong results
      * e.g. For HMC(100, 100, 50) time: 380505.616669ms
+     * For HMC(1000, 1000, 100) 6788099.496656ms
      */
     def implementation2(): Model = {
       val eff1Vec = Vec.from(alpha) //1.
@@ -142,30 +146,45 @@ object MapAnova2WithoutInters_vComp {
 
     println("sampling...")
     val vecModel = implementation2()
-    val warmupIters = 1000
-    val samplesPerChain = 1000
-    val leapfrogSteps = 100
-    val thinBy = 10
+    val warmupIters = 10
+    val samplesPerChain = 10
+    val leapfrogSteps = 5
+    val thinBy = 1
     val trace = time(vecModel.sample(HMC(warmupIters, samplesPerChain, leapfrogSteps)))
+    println("sampling over...")
     val traceThinned = trace.thin(thinBy)
 
-    var postAlphas = new mutable.ListBuffer[List[Double]]
+    val postmuTaus = DenseMatrix(DenseVector(traceThinned.predict(mu).toArray), DenseVector(traceThinned.predict(tauDRV).toArray), DenseVector(traceThinned.predict(tauE1RV).toArray), DenseVector(traceThinned.predict(tauE2RV).toArray))
+
+    val postAlphas = new mutable.ListBuffer[DenseMatrix[Double]]
     for(i <- 0 until n1){
-      postAlphas += traceThinned.predict(eff1p(i))
+      println(DenseMatrix(traceThinned.predict(eff1p(i)).toArray).size)
+      postAlphas += DenseMatrix(traceThinned.predict(eff1p(i)).toArray).t
     }
 
-    val postBetas = new mutable.ListBuffer[List[Double]]
+    var dmAlphas = DenseMatrix.zeros[Double](samplesPerChain*4/thinBy,1)
+    for(i <- 0 until n1){
+      dmAlphas = DenseMatrix.horzcat(dmAlphas, postAlphas(i))
+    }
+
+    val postBetas = new mutable.ListBuffer[DenseMatrix[Double]]
     for(i <- 0 until n2){
-      postBetas += traceThinned.predict(eff2p(i))
+      postBetas += DenseMatrix(traceThinned.predict(eff2p(i)).toArray).t
     }
 
-    val postmuTaus = Array(traceThinned.predict(mu).toArray, traceThinned.predict(tauDRV).toArray, traceThinned.predict(tauE1RV).toArray, traceThinned.predict(tauE2RV).toArray)
+    var dmBetas = DenseMatrix.zeros[Double](samplesPerChain*4/thinBy,1)
+    for(i <- 0 until n2){
+      dmBetas = DenseMatrix.horzcat(dmBetas, postBetas(i))
+    }
+
+    val mergedResults = DenseMatrix.horzcat(postmuTaus, dmAlphas, dmBetas)
+    breeze.linalg.csvwrite(new File("/home/antonia/ResultsFromCloud/CompareRainier/040619/withoutInteractions/1M/mutaus.csv"), mergedResults, separator = ',')
 
     println("mu, taus")
-    println(postmuTaus.map(el=> mean(el)).toList)
+    println(mean(postmuTaus(::, *)))
     println("alphas")
-    println(postAlphas.map(el=> el.sum/el.size))
+    println(mean(dmAlphas(::, *)))
     println("betas")
-    println(postBetas.map(el=> el.sum/el.size))
+    println(mean(dmBetas(::, *)))
   }
 }
