@@ -11,9 +11,11 @@ import com.stripe.rainier.sampler._
 import com.stripe.rainier.notebook._
 import breeze.stats.mean
 import java.io.PrintWriter
+
 import org.scalacheck.Prop.Exception
 
 import scala.annotation.tailrec
+import scala.collection.immutable.ListMap
 import scala.collection.mutable
 import scala.collection.mutable.ListBuffer
 
@@ -29,7 +31,7 @@ object MapAnova2WithInters_vComp {
    * Process data read from input file
    */
   def dataProcessing(): (Map[(Int, Int), List[Double]], (Array[Double], Array[Int], Array[Int]), Int, Int) = {
-    val data = csvread(new File("/home/antonia/ResultsFromCloud/CompareRainier/040619/withoutInteractions/1M/simulInter040619.csv"))
+    val data = csvread(new File("/home/antonia/ResultsFromCloud/CompareRainier/040619/withInteractions/simulInter040619.csv"))
     val sampleSize = data.rows
     //println(sampleSize)
     val y = data(::, 0).toArray
@@ -91,7 +93,14 @@ object MapAnova2WithInters_vComp {
     //Create a Vec[Real] for each effect
     val eff1p = Normal(0, sdE1).latentVec(n1)
     val eff2p = Normal(0, sdE2).latentVec(n2)
-    val interEffp = Normal(0, sdInter).latentVec(n1).map(i => Normal(0, sdInter).latentVec(n2))
+    //val interEffp = Normal(0, sdInter).latentVec(n1).map(i => Normal(0, sdInter).latentVec(n2))
+    val interEffp = Normal(0, sdInter).latentVec(dataMap.keys.size)
+    //println(interEffp.size)
+    //print(dataMap.keys.size)
+
+    val indSeqInters = dataMap.keys.toList.sortBy(_._1).sortBy(_._2).toIndexedSeq
+    val inters = (alpha zip beta).map{ case(i,j) => indSeqInters.indexOf((i,j))}
+    println(inters.toList)
 
     /**
      * Uses the imported data in format (y, alpha, beta)
@@ -99,16 +108,22 @@ object MapAnova2WithInters_vComp {
      * 2. zips the vecs to one Vec[(Real, Real)] to map over
      * 3. maps over the Vec[(Real, Real)] to create a normal for each observation
      * 4. Builds the model
+     *
+     * Problem: Slow and wrong results
+     * e.g. For HMC(100, 100, 50) time: 380505.616669ms
+     * For HMC(1000, 1000, 100) 6788099.496656ms
      */
     def implementation2(): Model = {
       val eff1Vec = Vec.from(alpha) //1.
       val eff2Vec = Vec.from(beta) //1.
-      val eff1VecZipEff2Vec = eff1Vec zip eff2Vec //2.
-      val modeleff1Vec = eff1VecZipEff2Vec.map{case (a,b) => Normal(mu + eff1p(a) + eff2p(b) + interEffp(a)(b), sdDR)} //3.
+      val interEffVec = Vec.from(inters)
+      val eff1VecZipEff2Vec = (eff1Vec zip eff2Vec zip interEffVec).map { case ((v1, v2), v3) => (v1, v2, v3) } //2.
+      val modeleff1Vec = eff1VecZipEff2Vec.map{case (a,b,c) => {Normal(mu + eff1p(a) + eff2p(b) + interEffp(c), sdDR)}} //3.
       val vecModel = Model.observe(obs.toList, modeleff1Vec) //4.
       vecModel
     }
-    
+
+
     def time[A](f: => A) = {
       val s = System.nanoTime
       val ret = f
@@ -127,45 +142,93 @@ object MapAnova2WithInters_vComp {
     val traceThinned = trace.thin(thinBy)
     val sampNo = samplesPerChain * 4 / thinBy
 
+    val InterEffp2D = interEffp.toList.toArray.grouped(10).toArray
+    val skatoul = traceThinned.predict(interEffp(1))
+    println(s"skatoul" + skatoul.length)
+    println(InterEffp2D)
+
     val postmuTaus = DenseMatrix(DenseVector(traceThinned.predict(mu).toArray), DenseVector(traceThinned.predict(tauDRV).toArray), DenseVector(traceThinned.predict(tauE1RV).toArray), DenseVector(traceThinned.predict(tauE2RV).toArray))
 
-    def predictAll(myTrace: Trace, vc: Vec[Real]) : List[List[Double]] = {
-      vc.map(i => myTrace.predict(i)).toList
+
+    def predictAllInters(myTrace: Trace, vc: Array[Array[Real]]) : Map[String, List[Double]] = {
+      vc.toList.zipWithIndex.flatMap {
+        case (e, i) => {
+          val skatoules = e.toList.zipWithIndex.map {
+            case (ee, j) => {
+              s"effInter( $i, $j)" ->
+                myTrace.predict(ee)
+            }
+          }
+          skatoules
+        }
+      }.toMap
     }
 
-    def printSamplesToCsv(filename: String, eff: List[List[Double]]): Unit = {
-      val builder = new StringBuilder()
+    val dokimi= predictAllInters(traceThinned, InterEffp2D)
 
+    def predictAll(myTrace: Trace, vc: Vec[Real]) : Map[String, List[Double]] = {
+      vc.toList.zipWithIndex.map{
+        case (e, i) => { "effA".concat(i.toString) -> myTrace.predict(e) }
+      }.toMap
+    }
+
+    def printSamplesToCsv(filename: String, eff: Map[String, List[Double]]): Unit = {
       val pw = new PrintWriter(new File(filename))
 
-      eff.transpose.foreach(line => {
-        line.foreach(double => {
-          builder.append(double.toString)
-          builder.append(",")
-        })
-        builder.deleteCharAt(builder.size-1) //delete last comma in line
+      def flushLineToDisk(builder: StringBuilder): Unit = {
         builder.append("\n")
-
         pw.append(builder) //a. Write at each line
         pw.flush() //a.
-        builder.clear() //a.
+        builder.clear()
+      }
+
+      val builder = new StringBuilder()
+
+      val sortedMap = ListMap(eff.toSeq.sortBy(_._1): _*)
+
+      //write titles to csv and export items as List[List[Double]]
+      val listOfItems = sortedMap.map( mapentry => {
+        builder.append(mapentry._1.concat(","))
+        mapentry._2
+      }).toList
+      builder.deleteCharAt(builder.size-1) //delete last comma in line
+      flushLineToDisk(builder)
+
+      listOfItems.transpose.foreach(line => {
+        line.foreach(double => {
+          builder.append(double.toString.concat(","))
+        })
+        builder.deleteCharAt(builder.size-1) //delete last comma in line
+        flushLineToDisk(builder)
       })
 
       //      pw.print(builder) //Or b. write at the end the whole thing
       pw.close()
     }
-    val postAlphasN = predictAll(traceThinned, eff1p)
+
+//    interEffp.toList.zipWithIndex.foreach { case (e, i) => {
+//      e.toList.zipWithIndex.foreach{case (ee, j) => {
+//        println(i, j)
+//        traceThinned.predict(interEffp)
+//      } }
+//    }
+//    }
+
+//    val postInters = predictAllInters(traceThinned, interEffp)
+
+
     println("ddd")
-    println(postAlphasN)
+    //println(postAlphasN)
     val added = List(traceThinned.predict(mu), traceThinned.predict(tauDRV))
-    printSamplesToCsv("/home/antonia/ResultsFromCloud/CompareRainier/040619/withoutInteractions/1M/alphasOnly.csv", postAlphasN)
+//    printSamplesToCsv("/home/antonia/ResultsFromCloud/CompareRainier/040619/withoutInteractions/1M/skataNew.csv", postInters)
 
     println("mu, taus")
     println(mean(postmuTaus(::, *)))
     println("alphas")
-    println(postAlphasN.map(el=>el.sum/el.size))
-    println("betas")
-    //println(mean(dmBetas(::, *)))
+    //println(postAlphasN.map(el=>el._2.sum/el._2.size))
+    println("dokimi")
+    println(dokimi.map{case(a,b) => (a, b.sum/b.size )})
+
 
 
   }
