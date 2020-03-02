@@ -1,23 +1,9 @@
-import java.io.{BufferedWriter, File, FileWriter}
-import java.util.stream.Collectors
-
+import java.io.{File, PrintWriter}
 import breeze.linalg._
-import com.cibo.evilplot.numeric.Point
-import com.cibo.evilplot.plot.{LinePlot, _}
-import com.cibo.evilplot.plot.aesthetics.DefaultTheme._
 import com.stripe.rainier.compute._
 import com.stripe.rainier.core._
 import com.stripe.rainier.sampler._
-import com.stripe.rainier.notebook._
-import breeze.stats.mean
-import java.io.PrintWriter
-
-import org.scalacheck.Prop.Exception
-
-import scala.annotation.tailrec
 import scala.collection.immutable.ListMap
-import scala.collection.mutable
-import scala.collection.mutable.ListBuffer
 
 object MapAnova2WithoutInters_vComp {
 
@@ -45,13 +31,10 @@ object MapAnova2WithoutInters_vComp {
     for (i <- 0 until l) {
       dataList = dataList :+ (alpha(i), beta(i))
     }
-    //println(dataList)
 
     val dataMap = (dataList zip y).groupBy(_._1).map { case (k, v) => ((k._1 - 1, k._2 - 1), v.map(_._2)) } //Bring the data to the map format
     val dataRaw = (y.map(i => i-1), alpha.toArray.map(i => i-1), beta.toArray.map(i => i-1))
-    //println(dataMap)
     (dataMap, dataRaw, nj, nk)
-
   }
 
   /**
@@ -114,7 +97,7 @@ object MapAnova2WithoutInters_vComp {
      * 3. maps over the Vec[(Real, Real)] to create a normal for each observation
      * 4. Builds the model
      *
-     * Problem: Slow and wrong results
+     * Problem: Slow
      * e.g. For HMC(100, 100, 50) time: 380505.616669ms
      * For HMC(1000, 1000, 100) 6788099.496656ms
      */
@@ -133,7 +116,7 @@ object MapAnova2WithoutInters_vComp {
      * 2. Creates the model per group
      * 3. Merges all the models
      *
-     * PROBLEM: Slow and wrong results
+     * PROBLEM: Slow and wrong results?
      */
     def implementation3(): Model = {
       val dataMapKeysToIndexseq = dataMap.keys.toIndexedSeq //1.
@@ -160,12 +143,15 @@ object MapAnova2WithoutInters_vComp {
     val traceThinned = trace.thin(thinBy)
     val sampNo = samplesPerChain * 4 / thinBy
 
-    val postmuTaus = DenseMatrix(DenseVector(traceThinned.predict(mu).toArray), DenseVector(traceThinned.predict(tauDRV).toArray), DenseVector(traceThinned.predict(tauE1RV).toArray), DenseVector(traceThinned.predict(tauE2RV).toArray))
 
-    def predictAll(myTrace: Trace, vc: Vec[Real]) : Map[String, List[Double]] = {
+    def predictMainEffs(myTrace: Trace, vc: Vec[Real], name: String) : Map[String, List[Double]] = {
      vc.toList.zipWithIndex.map{
-       case (e, i) => { "effA".concat(i.toString) -> myTrace.predict(e) }
+       case (e, i) => { name.concat(i.toString) -> myTrace.predict(e) }
      }.toMap
+    }
+
+    def predictmuSigmas(myTrace: Trace, r: Real, name: String) : Map[String, List[Double]] = {
+      Map(name-> myTrace.predict(r))
     }
 
     def printSamplesToCsv(filename: String, eff: Map[String, List[Double]]): Unit = {
@@ -201,20 +187,24 @@ object MapAnova2WithoutInters_vComp {
 //      pw.print(builder) //Or b. write at the end the whole thing
       pw.close()
     }
-    val postAlphasN = predictAll(traceThinned, eff1p)
-    println("ddd")
-    println(postAlphasN)
-    val added = List(traceThinned.predict(mu), traceThinned.predict(tauDRV))
-    printSamplesToCsv("/home/antonia/ResultsFromCloud/CompareRainier/040619/withoutInteractions/1M/alphasOnly.csv", postAlphasN)
 
-    println("mu, taus")
-    println(mean(postmuTaus(::, *)))
+    val postmu = predictmuSigmas(traceThinned, mu, "mu")
+    val postsd = predictmuSigmas(traceThinned, sdDR, "sdDR")
+    val postsdE1 = predictmuSigmas(traceThinned, sdE1, "sdE1")
+    val postsdE2 = predictmuSigmas(traceThinned, sdE2, "sdE2")
+    val postAlphas = predictMainEffs(traceThinned, eff1p, "effA")
+    val postBetas = predictMainEffs(traceThinned, eff2p, "effB")
+
+    val muSigmas = postmu ++ postsd ++ postsdE1 ++ postsdE2
+    val allRes =  muSigmas ++ postAlphas ++ postBetas
+    printSamplesToCsv("/home/antonia/ResultsFromCloud/CompareRainier/040619/withoutInteractions/1M/alphasOnly.csv", allRes)
+
+    println("muSigmas")
+    println(muSigmas.map(el =>el._2.sum/el._2.size))
     println("alphas")
-    println(postAlphasN.map(el=>el._2.sum/el._2.size))
+    println(postAlphas.map(el=>el._2.sum/el._2.size))
     println("betas")
-    //println(mean(dmBetas(::, *)))
-
-
+    println(postBetas.map(el=>el._2.sum/el._2.size))
   }
 }
 
