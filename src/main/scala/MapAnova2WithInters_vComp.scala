@@ -1,23 +1,11 @@
-import java.io.{BufferedWriter, File, FileWriter}
-import java.util.stream.Collectors
+import java.io.{BufferedWriter, File, FileWriter, PrintWriter}
 
 import breeze.linalg._
-import com.cibo.evilplot.numeric.Point
-import com.cibo.evilplot.plot.{LinePlot, _}
-import com.cibo.evilplot.plot.aesthetics.DefaultTheme._
 import com.stripe.rainier.compute._
 import com.stripe.rainier.core._
 import com.stripe.rainier.sampler._
-import com.stripe.rainier.notebook._
-import breeze.stats.mean
-import java.io.PrintWriter
 
-import org.scalacheck.Prop.Exception
-
-import scala.annotation.tailrec
 import scala.collection.immutable.ListMap
-import scala.collection.mutable
-import scala.collection.mutable.ListBuffer
 
 object MapAnova2WithInters_vComp {
 
@@ -31,7 +19,7 @@ object MapAnova2WithInters_vComp {
    * Process data read from input file
    */
   def dataProcessing(): (Map[(Int, Int), List[Double]], (Array[Double], Array[Int], Array[Int]), Int, Int) = {
-    val data = csvread(new File("/home/antonia/ResultsFromCloud/CompareRainier/040619/withInteractions/simulInter040619.csv"))
+    val data = csvread(new File("./SimulatedDataAndTrueCoefs/simulDataWithInters.csv"))
     val sampleSize = data.rows
     //println(sampleSize)
     val y = data(::, 0).toArray
@@ -93,82 +81,85 @@ object MapAnova2WithInters_vComp {
     //Create a Vec[Real] for each effect
     val eff1p = Normal(0, sdE1).latentVec(n1)
     val eff2p = Normal(0, sdE2).latentVec(n2)
-    //val interEffp = Normal(0, sdInter).latentVec(n1).map(i => Normal(0, sdInter).latentVec(n2))
     val interEffp = Normal(0, sdInter).latentVec(dataMap.keys.size)
-    //println(interEffp.size)
-    //print(dataMap.keys.size)
 
+    // Cretate an indexedSeq to act as dictionary for the sorted keys of the dataMap. Match keys (a,b) to a single Int
     val indSeqInters = dataMap.keys.toList.sortBy(_._1).sortBy(_._2).toIndexedSeq
+    //Create an Array[Int] corresponding to the Int of the interaction
     val inters = (alpha zip beta).map{ case(i,j) => indSeqInters.indexOf((i,j))}
-    println(inters.toList)
 
     /**
      * Uses the imported data in format (y, alpha, beta)
-     * 1. Creates a Vec[Real] for columns alpha & beta
-     * 2. zips the vecs to one Vec[(Real, Real)] to map over
-     * 3. maps over the Vec[(Real, Real)] to create a normal for each observation
+     * 1. Creates a Vec[Real] for columns alpha, beta and inters
+     * 2. zips the vecs to one Vec[(Real, Real, Real)], corresponding to (a, b, inter) to map over
+     * 3. maps over the Vec[(Real, Real, Real)] to create a normal for each observation
      * 4. Builds the model
      *
-     * Problem: Slow and wrong results
-     * e.g. For HMC(100, 100, 50) time: 380505.616669ms
-     * For HMC(1000, 1000, 100) 6788099.496656ms
+     * Problem: Slow
+     * e.g. For HMC(1000, 1000, 100) 7.1901298318866E7ms
      */
     def implementation2(): Model = {
       val eff1Vec = Vec.from(alpha) //1.
       val eff2Vec = Vec.from(beta) //1.
-      val interEffVec = Vec.from(inters)
+      val interEffVec = Vec.from(inters) //1.
       val eff1VecZipEff2Vec = (eff1Vec zip eff2Vec zip interEffVec).map { case ((v1, v2), v3) => (v1, v2, v3) } //2.
       val modeleff1Vec = eff1VecZipEff2Vec.map{case (a,b,c) => {Normal(mu + eff1p(a) + eff2p(b) + interEffp(c), sdDR)}} //3.
       val vecModel = Model.observe(obs.toList, modeleff1Vec) //4.
       vecModel
     }
 
-
-    def time[A](f: => A) = {
+    // Calculation of the execution time
+    def time[A](f: => A): A = {
       val s = System.nanoTime
       val ret = f
-      println("time: " + (System.nanoTime - s) / 1e6 + "ms")
+      val execTime = (System.nanoTime - s) / 1e6
+      println("time: " + execTime + "ms")
+      val bw = new BufferedWriter(new FileWriter(new File("./SimulatedDataAndTrueCoefs/results/RainierResWithInterHMC200-1mTimeNewVersion.txt")))
+      bw.write(execTime.toString)
+      bw.close()
       ret
     }
 
     println("sampling...")
     val vecModel = implementation2()
-    val warmupIters = 10
-    val samplesPerChain = 10
-    val leapfrogSteps = 5
-    val thinBy = 1
+    val warmupIters = 1000
+    val samplesPerChain = 500
+    val leapfrogSteps = 100
+    val thinBy = 10
     val trace = time(vecModel.sample(HMC(warmupIters, samplesPerChain, leapfrogSteps)))
     println("sampling over...")
     val traceThinned = trace.thin(thinBy)
     val sampNo = samplesPerChain * 4 / thinBy
 
-    val InterEffp2D = interEffp.toList.toArray.grouped(10).toArray
-    val skatoul = traceThinned.predict(interEffp(1))
-    println(s"skatoul" + skatoul.length)
-    println(InterEffp2D)
+    /**
+     * Returns the samples of mu and sigmas
+     */
+    def predictmuSigmas(myTrace: Trace, r: Real, name: String) : Map[String, List[Double]] = {
+      Map(name-> myTrace.predict(r))
+    }
 
-    val postmuTaus = DenseMatrix(DenseVector(traceThinned.predict(mu).toArray), DenseVector(traceThinned.predict(tauDRV).toArray), DenseVector(traceThinned.predict(tauE1RV).toArray), DenseVector(traceThinned.predict(tauE2RV).toArray))
-
-
-    def predictAllInters(myTrace: Trace, vc: Array[Array[Real]]) : Map[String, List[Double]] = {
-      vc.toList.zipWithIndex.flatMap {
-        case (e, i) => {
-          val skatoules = e.toList.zipWithIndex.map {
-            case (ee, j) => {
-              s"effInter( $i, $j)" ->
-                myTrace.predict(ee)
-            }
-          }
-          skatoules
-        }
+    /**
+     * Returns the samples of the main effects
+     */
+    def predictMainEffs(myTrace: Trace, vc: Vec[Real], name: String) : Map[String, List[Double]] = {
+      vc.toList.zipWithIndex.map{
+        case (e, i) => { name.concat(i.toString) -> myTrace.predict(e) }
       }.toMap
     }
 
-    val dokimi= predictAllInters(traceThinned, InterEffp2D)
-
-    def predictAll(myTrace: Trace, vc: Vec[Real]) : Map[String, List[Double]] = {
-      vc.toList.zipWithIndex.map{
-        case (e, i) => { "effA".concat(i.toString) -> myTrace.predict(e) }
+    /**
+     * Returns the samples of the interaction effects
+     */
+    def predictInterEffs(myTrace: Trace, vc: Array[Array[Real]], name: String) : Map[String, List[Double]] = {
+      vc.toList.zipWithIndex.flatMap {
+        case (e, i) => {
+          e.toList.zipWithIndex.map {
+            case (ee, j) => {
+              name.concat(s"($i _$j)") ->
+                myTrace.predict(ee)
+            }
+          }
+        }
       }.toMap
     }
 
@@ -186,7 +177,7 @@ object MapAnova2WithInters_vComp {
 
       val sortedMap = ListMap(eff.toSeq.sortBy(_._1): _*)
 
-      //write titles to csv and export items as List[List[Double]]
+      //Write titles to csv and export items as List[List[Double]]
       val listOfItems = sortedMap.map( mapentry => {
         builder.append(mapentry._1.concat(","))
         mapentry._2
@@ -206,29 +197,29 @@ object MapAnova2WithInters_vComp {
       pw.close()
     }
 
-//    interEffp.toList.zipWithIndex.foreach { case (e, i) => {
-//      e.toList.zipWithIndex.foreach{case (ee, j) => {
-//        println(i, j)
-//        traceThinned.predict(interEffp)
-//      } }
-//    }
-//    }
+    val postmu = predictmuSigmas(traceThinned, mu, "mu")
+    val postsd = predictmuSigmas(traceThinned, sdDR, "sdDR")
+    val postsdE1 = predictmuSigmas(traceThinned, sdE1, "sdE1")
+    val postsdE2 = predictmuSigmas(traceThinned, sdE2, "sdE2")
+    val postAlphas = predictMainEffs(traceThinned, eff1p, "effA")
+    val postBetas = predictMainEffs(traceThinned, eff2p, "effB")
+    //Turns the Array[Real] for the interaction effects to a 2-Dimensional Array
+    val InterEffp2D = interEffp.toList.toArray.grouped(n2).toArray
+    val postInterEffs = predictInterEffs(traceThinned, InterEffp2D, "interEff")
 
-//    val postInters = predictAllInters(traceThinned, interEffp)
+    val muSigmas = postmu ++ postsd ++ postsdE1 ++ postsdE2
+    val allRes =  muSigmas ++ postAlphas ++ postBetas ++ postInterEffs
 
-
-    println("ddd")
-    //println(postAlphasN)
-    val added = List(traceThinned.predict(mu), traceThinned.predict(tauDRV))
-//    printSamplesToCsv("/home/antonia/ResultsFromCloud/CompareRainier/040619/withoutInteractions/1M/skataNew.csv", postInters)
-
-    println("mu, taus")
-    println(mean(postmuTaus(::, *)))
+    println("muSigmas")
+    println(muSigmas.map{case(a,b) => (a, b.sum/b.size)})
     println("alphas")
-    //println(postAlphasN.map(el=>el._2.sum/el._2.size))
-    println("dokimi")
-    println(dokimi.map{case(a,b) => (a, b.sum/b.size )})
+    println(postAlphas.map{case(a,b) => (a, b.sum/b.size)})
+    println("betas")
+    println(postBetas.map{case(a,b) => (a, b.sum/b.size)})
+    println("interaction effects")
+    println(postInterEffs.map{case(a,b) => (a, b.sum/b.size)})
 
+    printSamplesToCsv("./SimulatedDataAndTrueCoefs/results/RainierResWithInterHMC200-1mTimeNewVersion.csv", allRes)
 
 
   }

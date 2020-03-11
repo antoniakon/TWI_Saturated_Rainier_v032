@@ -1,8 +1,10 @@
-import java.io.{File, PrintWriter}
+import java.io.{BufferedWriter, File, FileWriter, PrintWriter}
+
 import breeze.linalg._
 import com.stripe.rainier.compute._
 import com.stripe.rainier.core._
 import com.stripe.rainier.sampler._
+
 import scala.collection.immutable.ListMap
 
 object MapAnova2WithoutInters_vComp {
@@ -17,7 +19,7 @@ object MapAnova2WithoutInters_vComp {
    * Process data read from input file
    */
   def dataProcessing(): (Map[(Int, Int), List[Double]], (Array[Double], Array[Int], Array[Int]), Int, Int) = {
-    val data = csvread(new File("/home/antonia/ResultsFromCloud/CompareRainier/040619/withoutInteractions/1M/simulNoInter040619.csv"))
+    val data = csvread(new File("./SimulatedDataAndTrueCoefs/simulDataNoInters.csv"))
     val sampleSize = data.rows
     //println(sampleSize)
     val y = data(::, 0).toArray
@@ -125,19 +127,24 @@ object MapAnova2WithoutInters_vComp {
       model
     }
 
-    def time[A](f: => A) = {
+    // Calculation of the execution time
+    def time[A](f: => A): A = {
       val s = System.nanoTime
       val ret = f
-      println("time: " + (System.nanoTime - s) / 1e6 + "ms")
+      val execTime = (System.nanoTime - s) / 1e6
+      println("time: " + execTime + "ms")
+      val bw = new BufferedWriter(new FileWriter(new File("./SimulatedDataAndTrueCoefs/results/RainierResWithoutInterHMC200-1mTimeNewVersion.txt")))
+      bw.write(execTime.toString)
+      bw.close()
       ret
     }
 
     println("sampling...")
     val vecModel = implementation2()
-    val warmupIters = 10
-    val samplesPerChain = 10
-    val leapfrogSteps = 5
-    val thinBy = 1
+    val warmupIters = 1000
+    val samplesPerChain = 500
+    val leapfrogSteps = 100
+    val thinBy = 10
     val trace = time(vecModel.sample(HMC(warmupIters, samplesPerChain, leapfrogSteps)))
     println("sampling over...")
     val traceThinned = trace.thin(thinBy)
@@ -197,7 +204,7 @@ object MapAnova2WithoutInters_vComp {
 
     val muSigmas = postmu ++ postsd ++ postsdE1 ++ postsdE2
     val allRes =  muSigmas ++ postAlphas ++ postBetas
-    printSamplesToCsv("/home/antonia/ResultsFromCloud/CompareRainier/040619/withoutInteractions/1M/alphasOnly.csv", allRes)
+    printSamplesToCsv("./SimulatedDataAndTrueCoefs/results/RainierResWithoutInterHMC200-1mTimeNewVersion.csv", allRes)
 
     println("muSigmas")
     println(muSigmas.map(el =>el._2.sum/el._2.size))

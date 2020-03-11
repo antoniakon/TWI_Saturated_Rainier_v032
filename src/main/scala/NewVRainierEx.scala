@@ -23,6 +23,7 @@ object NewVRainierEx {
     val effects = Vector.fill(n)(sigE * rng.standardNormal)
     val data = effects map (e =>
       Vector.fill(N)(mu + e + sigD * rng.standardNormal))
+    println(data)
     // build model
     val m = Normal(0, 100).latent
     val sD = LogNormal(0, 10).latent
@@ -30,7 +31,9 @@ object NewVRainierEx {
     val eff = Vector.fill(n)(Normal(m, sE).latent)
     val models = (0 until n).map(i =>
       Model.observe(data(i), Normal(eff(i), sD)))
+    println(models.size)
     val model = models.reduce{(m1, m2) => m1.merge(m2)}
+    println(model.targetGroup.outputs)
     // now sample the model
     //val sampler = EHMC(warmupIterations = 10, iterations = 10)
     println("sampling...")
@@ -39,8 +42,8 @@ object NewVRainierEx {
     val trace = model.sample(HMC(1000, 100, 50))
     println(trace.chains)
     println("finished sampling.")
-    //val mt = trace.predict(m)
-    //show("mu", density(mt))
+    val mt = trace.predict(m)
+    show("mu", density(mt))
     //displayPlot(density(mt).render())
   }
 
