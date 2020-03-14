@@ -35,7 +35,7 @@ object MapAnova2WithoutInters_vComp {
     }
 
     val dataMap = (dataList zip y).groupBy(_._1).map { case (k, v) => ((k._1 - 1, k._2 - 1), v.map(_._2)) } //Bring the data to the map format
-    val dataRaw = (y.map(i => i-1), alpha.toArray.map(i => i-1), beta.toArray.map(i => i-1))
+    val dataRaw = (y, alpha.toArray.map(i => i-1), beta.toArray.map(i => i-1))
     (dataMap, dataRaw, nj, nk)
   }
 
