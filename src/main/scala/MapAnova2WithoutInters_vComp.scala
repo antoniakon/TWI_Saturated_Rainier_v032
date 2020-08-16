@@ -7,21 +7,42 @@ import com.stripe.rainier.sampler._
 
 import scala.collection.immutable.ListMap
 
+/**
+ * Builds a 2-way Anova saturated model with main effects only in Scala using Rainier version 0.3.2
+ * Three alternative implementations explored
+ * Main effects: a and b
+ * Model: X_ijk | mu, a_j, b_k, tau  ~ N(mu + a_j + b_k, τ^−1 )
+ */
 object MapAnova2WithoutInters_vComp {
 
   def main(args: Array[String]): Unit = {
     val rng = ScalaRNG(3)
-    val (data, dataRaw, n1, n2) = dataProcessing()
-    mainEffects(data, dataRaw, rng, n1, n2)
+    val inputFilePath = "./SimulatedDataAndTrueCoefs/simulDataNoInters.csv"
+    val outputFilePath = "./SimulatedDataAndTrueCoefs/results/RainierResWithInterHMC50-200V032.csv"
+    val runtimeFilePath = "./SimulatedDataAndTrueCoefs/results/RainierResWithoutInterHMC50-1mV032.txt"
+    val (data, dataRaw, n1, n2) = dataProcessing(inputFilePath)
+    mainEffects(data, dataRaw, rng, n1, n2, runtimeFilePath, outputFilePath)
+  }
+
+  /**
+   * Calculate execution time
+   */
+  def time[A](f: => A, runtimeFilePath: String): A = {
+    val s = System.nanoTime
+    val ret = f
+    val execTime = (System.nanoTime - s) / 1e6
+    println("time: " + execTime + "ms")
+    val bw = new BufferedWriter(new FileWriter(new File(runtimeFilePath)))
+    bw.write(execTime.toString)
+    bw.close()
+    ret
   }
 
   /**
    * Process data read from input file
    */
-  def dataProcessing(): (Map[(Int, Int), List[Double]], (Array[Double], Array[Int], Array[Int]), Int, Int) = {
-    val data = csvread(new File("./SimulatedDataAndTrueCoefs/simulDataNoInters.csv"))
-    val sampleSize = data.rows
-    //println(sampleSize)
+  def dataProcessing(inputFilePath: String): (Map[(Int, Int), List[Double]], (Array[Double], Array[Int], Array[Int]), Int, Int) = {
+    val data = csvread(new File(inputFilePath))
     val y = data(::, 0).toArray
     val alpha = data(::, 1).map(_.toInt)
     val beta = data(::, 2).map(_.toInt)
@@ -42,19 +63,18 @@ object MapAnova2WithoutInters_vComp {
   /**
    * Use Rainier for modelling the main effects only, without interactions
    */
-  def mainEffects(dataMap: Map[(Int, Int), List[Double]], dataRaw: (Array[Double], Array[Int], Array[Int]), rngS: ScalaRNG, n1: Int, n2: Int): Unit = {
+  def mainEffects(dataMap: Map[(Int, Int), List[Double]], dataRaw: (Array[Double], Array[Int], Array[Int]), rngS: ScalaRNG, n1: Int, n2: Int, runtimeFilePath: String, outputFilePath: String): Unit = {
+    implicit val rng = rngS
 
     // Implementation of sqrt for Real
     def sqrtR(x: Real): Real = {
-      val lx = (Real(0.5) * x.log).exp
-      lx
+      (Real(0.5) * x.log).exp
     }
 
     val obs = dataRaw._1
     val alpha = dataRaw._2
     val beta = dataRaw._3
 
-    implicit val rng = rngS
     val n = dataMap.size //No of groups
     // Priors for the unknown parameters
     val mu = Normal(0, 100).latent
@@ -82,7 +102,7 @@ object MapAnova2WithoutInters_vComp {
      * 3. maps over the vec to create a normal for each observation
      * 4. Builds the model
      *
-     * PROBLEM: Does not do anything
+     * PROBLEM: Does not seem to work
      */
     def implementation1(): Model ={
       val allEffs = (0 until obs.size).map(i => mu + eff1p(alpha(i)) + eff2p(beta(i))) //1.
@@ -118,7 +138,7 @@ object MapAnova2WithoutInters_vComp {
      * 2. Creates the model per group
      * 3. Merges all the models
      *
-     * PROBLEM: Slow and wrong results?
+     * PROBLEM: Slow
      */
     def implementation3(): Model = {
       val dataMapKeysToIndexseq = dataMap.keys.toIndexedSeq //1.
@@ -127,40 +147,37 @@ object MapAnova2WithoutInters_vComp {
       model
     }
 
-    // Calculation of the execution time
-    def time[A](f: => A): A = {
-      val s = System.nanoTime
-      val ret = f
-      val execTime = (System.nanoTime - s) / 1e6
-      println("time: " + execTime + "ms")
-      val bw = new BufferedWriter(new FileWriter(new File("./SimulatedDataAndTrueCoefs/results/RainierResWithoutInterHMC200-1mTimeNewVersion.txt")))
-      bw.write(execTime.toString)
-      bw.close()
-      ret
-    }
-
     println("sampling...")
+    // Call specific implementation
     val vecModel = implementation2()
-    val warmupIters = 1000
-    val samplesPerChain = 500
-    val leapfrogSteps = 100
+    val warmupIters = 10000
+    val samplesPerChain = 250000
+    val leapfrogSteps = 50
     val thinBy = 10
-    val trace = time(vecModel.sample(HMC(warmupIters, samplesPerChain, leapfrogSteps)))
+    val trace = time(vecModel.sample(HMC(warmupIters, samplesPerChain, leapfrogSteps)), runtimeFilePath)
     println("sampling over...")
     val traceThinned = trace.thin(thinBy)
     val sampNo = samplesPerChain * 4 / thinBy
 
-
+    /**
+     * Returns the samples of the main effects
+     */
     def predictMainEffs(myTrace: Trace, vc: Vec[Real], name: String) : Map[String, List[Double]] = {
-     vc.toList.zipWithIndex.map{
-       case (e, i) => { name.concat(i.toString) -> myTrace.predict(e) }
-     }.toMap
+      vc.toList.zipWithIndex.map{
+        case (e, i) => { name.concat(i.toString) -> myTrace.predict(e) }
+      }.toMap
     }
 
+    /**
+     * Returns the samples of mu and sigmas
+     */
     def predictmuSigmas(myTrace: Trace, r: Real, name: String) : Map[String, List[Double]] = {
       Map(name-> myTrace.predict(r))
     }
 
+    /**
+     * Save results to csv files
+     */
     def printSamplesToCsv(filename: String, eff: Map[String, List[Double]]): Unit = {
       val pw = new PrintWriter(new File(filename))
 
@@ -191,7 +208,7 @@ object MapAnova2WithoutInters_vComp {
         flushLineToDisk(builder)
       })
 
-//      pw.print(builder) //Or b. write at the end the whole thing
+      //      pw.print(builder) //Or b. write at the end the whole thing
       pw.close()
     }
 
@@ -204,7 +221,7 @@ object MapAnova2WithoutInters_vComp {
 
     val muSigmas = postmu ++ postsd ++ postsdE1 ++ postsdE2
     val allRes =  muSigmas ++ postAlphas ++ postBetas
-    printSamplesToCsv("./SimulatedDataAndTrueCoefs/results/RainierResWithoutInterHMC200-1mTimeNewVersion.csv", allRes)
+    printSamplesToCsv(outputFilePath, allRes)
 
     println("muSigmas")
     println(muSigmas.map(el =>el._2.sum/el._2.size))
